@@ -1,6 +1,7 @@
 package gitstats
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -11,7 +12,6 @@ import (
 	"github.com/intelsdi-x/snap/control/plugin/cpolicy"
 	"github.com/intelsdi-x/snap/core"
 	"github.com/intelsdi-x/snap/core/ctypes"
-	"golang.org/x/oauth2"
 )
 
 const (
@@ -75,11 +75,10 @@ func (f *Gitstats) CollectMetrics(mts []plugin.MetricType) ([]plugin.MetricType,
 }
 
 func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType, error) {
-	ts := oauth2.StaticTokenSource(
-		&oauth2.Token{AccessToken: accessToken},
-	)
-	tc := oauth2.NewClient(oauth2.NoContext, ts)
-	client := github.NewClient(tc)
+	ctx := context.Background()
+
+	client := NewClient(accessToken)
+
 	collectionTime := time.Now()
 	repos := make(map[string]map[string]map[string]int)
 	users := make(map[string]map[string]int)
@@ -111,12 +110,12 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 			if user == "*" {
 				//need to get user
 				if authUser == "" {
-					gitUser, _, err := client.Users.Get("")
+					gitUser, _, err := client.GetUsers(ctx, "")
 					if err != nil {
 						LogError("failed to get authenticated user.", err)
 						return nil, err
 					}
-					stats, err := userStats(gitUser, client)
+					stats, err := userStats(ctx, gitUser, client)
 					if err != nil {
 						LogError("failed to get stats from user object.", err)
 						return nil, err
@@ -130,7 +129,7 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 				// get list of all repos owned by the user.
 				if _, ok := userRepos[user]; !ok {
 					opt := &github.RepositoryListOptions{Type: "owner"}
-					repoList, _, err := client.Repositories.List(user, opt)
+					repoList, _, err := client.ListRepositories(ctx, user, opt)
 					if err != nil {
 						LogError("failed to get repos owned by user.", err)
 						return nil, err
@@ -167,7 +166,7 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 					repos[user] = make(map[string]map[string]int)
 				}
 				if _, ok := repos[user][repoSlug]; !ok {
-					r, _, err := client.Repositories.Get(user, repo)
+					r, _, err := client.GetRepository(ctx, user, repo)
 					if err != nil {
 						LogError("failed to user repos.", err)
 						return nil, err
@@ -194,13 +193,13 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 			if user == "*" {
 				//need to get user
 				if authUser == "" {
-					gitUser, _, err := client.Users.Get("")
+					gitUser, _, err := client.GetUsers(ctx, "")
 					if err != nil {
 						LogError("failed to get authenticated user.", err)
 						return nil, err
 					}
 					authUser = *gitUser.Login
-					stats, err := userStats(gitUser, client)
+					stats, err := userStats(ctx, gitUser, client)
 					if err != nil {
 						LogError("failed to get stats from user object", err)
 						return nil, err
@@ -208,12 +207,12 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 					users[authUser] = stats
 				} else {
 					if _, ok := users[authUser]; !ok {
-						gitUser, _, err := client.Users.Get(authUser)
+						gitUser, _, err := client.GetUsers(ctx, authUser)
 						if err != nil {
 							LogError("failed to get authenticated user.", err)
 							return nil, err
 						}
-						stats, err := userStats(gitUser, client)
+						stats, err := userStats(ctx, gitUser, client)
 						if err != nil {
 							LogError("failed to get stats from user object", err)
 							return nil, err
@@ -225,12 +224,12 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 			} else {
 				if _, ok := users[user]; !ok {
 					fmt.Printf("getting stats for user %s\n", user)
-					u, _, err := client.Users.Get(user)
+					u, _, err := client.GetUsers(ctx, user)
 					if err != nil {
 						LogError("failed to lookup user.", err)
 						return nil, err
 					}
-					stats, err := userStats(u, client)
+					stats, err := userStats(ctx, u, client)
 					if err != nil {
 						LogError("failed to get stats from user object.", err)
 						return nil, err
@@ -251,7 +250,7 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 	return metrics, nil
 }
 
-func userStats(user *github.User, client *github.Client) (map[string]int, error) {
+func userStats(ctx context.Context, user *github.User, client *GithubClient) (map[string]int, error) {
 
 	stats := make(map[string]int)
 	if user.PublicRepos != nil {
@@ -268,7 +267,7 @@ func userStats(user *github.User, client *github.Client) (map[string]int, error)
 	}
 
 	if *user.Type == "Organization" {
-		org, _, err := client.Organizations.Get(*user.Login)
+		org, _, err := client.GetOrganizations(ctx, *user.Login)
 		if err != nil {
 			LogError("failed to lookup org data.", err)
 			return nil, err
