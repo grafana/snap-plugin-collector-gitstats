@@ -2,8 +2,13 @@ package gitstats
 
 import (
 	"os"
+	"strings"
 	"testing"
+	"time"
 
+	"context"
+
+	"github.com/google/go-github/github"
 	"github.com/intelsdi-x/snap/control/plugin"
 	"github.com/intelsdi-x/snap/control/plugin/cpolicy"
 	"github.com/intelsdi-x/snap/core"
@@ -61,11 +66,104 @@ func TestGitstatsPlugin(t *testing.T) {
 	})
 }
 
+var open = "open"
+var closed = "closed"
+var label1 = "label1"
+var label2 = "label2"
+var label3 = "label3"
+
+var fakeIssues = []*github.Issue{
+	{State: &open, Labels: []github.Label{{Name: &label1}}},
+	{State: &open, Labels: []github.Label{{Name: &label1}}},
+	{State: &open, Labels: []github.Label{{Name: &label2}}},
+	{State: &closed, Labels: []github.Label{{Name: &label1}}},
+	{State: &closed, Labels: []github.Label{{Name: &label2}}},
+	{State: &closed, Labels: []github.Label{{Name: &label2}}},
+	{State: &open, Labels: []github.Label{}},
+	{State: &closed, Labels: []github.Label{}},
+}
+var cfg = setupCfg("grafana", "grafana")
+
+type expected struct {
+	Key   string
+	Value int
+}
+
+var issuesByLabelCases = []struct {
+	issues   []*github.Issue
+	metrics  []plugin.MetricType
+	expected []expected
+}{
+	{
+		issues:  fakeIssues,
+		metrics: getIssuesByLabelTypes(cfg),
+		expected: []expected{
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label1.open.count", 2},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label1.closed.count", 1},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label2.open.count", 1},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label2.closed.count", 2},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label3.open.count", 0},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.label3.closed.count", 0},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.NoLabel.open.count", 1},
+			{"raintank.apps.gitstats.repo.grafana.grafana.issuesbylabel.NoLabel.closed.count", 1},
+		},
+	},
+}
+
+func TestIssueMetrics(t *testing.T) {
+	Convey("Create Issue metrics", t, func() {
+		for _, c := range issuesByLabelCases {
+			metrics, err := collectIssueMetrics(
+				c.metrics[0],
+				time.Now(),
+				"grafana",
+				"grafana",
+				[]*github.Label{{Name: &label1}, {Name: &label2}, {Name: &label3}}, c.issues)
+			So(err, ShouldBeNil)
+
+			So(metrics, ShouldNotBeNil)
+			So(len(metrics), ShouldEqual, len(c.expected))
+			for _, expected := range c.expected {
+				for i := 0; i < len(metrics); i++ {
+					if format(&metrics[i]) == expected.Key {
+						So(metrics[i].Data(), ShouldEqual, expected.Value)
+						t.Log(metrics[i].Namespace().String(), metrics[i].Data())
+					}
+				}
+			}
+		}
+	})
+}
+
+func format(m *plugin.MetricType) string {
+	return strings.Join(m.Namespace().Strings(), ".")
+}
+
+func SkipTestGetAllIssues(t *testing.T) {
+	if os.Getenv("GITSTATS_ACCESS_TOKEN") == "" {
+		return
+	}
+
+	Convey("Get All Issues", t, func() {
+		client := NewClient(os.Getenv("GITSTATS_ACCESS_TOKEN"))
+		issues, err := client.GetAllIssues(context.Background(), "grafana", "grafana")
+
+		So(err, ShouldBeNil)
+		So(len(issues), ShouldBeGreaterThan, 7000)
+		So(issues[0], ShouldEqual, "test")
+
+		labels, err := client.GetAllLabels(context.Background(), "grafana", "grafana")
+		So(err, ShouldBeNil)
+		So(len(labels), ShouldBeGreaterThan, 10)
+	})
+
+}
+
 func TestGitstatsCollectMetrics(t *testing.T) {
 	if os.Getenv("GITSTATS_ACCESS_TOKEN") == "" {
 		return
 	}
-	cfg := setupCfg("woodsaj", "")
+	cfg := setupCfg("grafana", "grafana")
 
 	Convey("Ping collector", t, func() {
 		p := &Gitstats{}
@@ -81,20 +179,20 @@ func TestGitstatsCollectMetrics(t *testing.T) {
 			mts := []plugin.MetricType{
 				{
 					Namespace_: core.NewNamespace(
-						"raintank", "apps", "gitstats", "user", "*", "followers"),
+						"raintank", "apps", "gitstats", "repo", "*", "*", "issuesbylabel", "*", "*", "count"),
 					Config_: cfg.ConfigDataNode,
 				},
 			}
 			metrics, err := p.CollectMetrics(mts)
 			So(err, ShouldBeNil)
 			So(metrics, ShouldNotBeNil)
-			So(len(metrics), ShouldEqual, 1)
+			// So(len(metrics), ShouldEqual, 1)
 			So(metrics[0].Namespace()[0].Value, ShouldEqual, "raintank")
 			So(metrics[0].Namespace()[1].Value, ShouldEqual, "apps")
 			So(metrics[0].Namespace()[2].Value, ShouldEqual, "gitstats")
 			for _, m := range metrics {
-				So(m.Namespace()[3].Value, ShouldEqual, "user")
-				So(m.Namespace()[4].Value, ShouldEqual, "woodsaj")
+				So(m.Namespace()[3].Value, ShouldEqual, "repo")
+				So(m.Namespace()[4].Value, ShouldEqual, "grafana")
 				t.Log(m.Namespace().String(), m.Data())
 			}
 		})

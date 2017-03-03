@@ -139,13 +139,29 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 						repos[user] = make(map[string]map[string]int)
 					}
 					for _, r := range repoList {
-						stats, err := repoStats(r)
-						if err != nil {
-							LogError("failed to get stats from repo object.", err)
-							return nil, err
-						}
 						repoSlug := slug.Make(*r.Name)
-						repos[user][repoSlug] = stats
+
+						if stat == "issuesbylabel" {
+							labels, issues, err := client.GetAllLabelsAndIssues(ctx, user, repo)
+							if err != nil {
+								LogError("failed to get labels and issues from repo object.", err)
+								return nil, err
+							}
+
+							issueMetrics, err := collectIssueMetrics(m, collectionTime, user, repoSlug, labels, issues)
+							if err != nil {
+								LogError("failed to get issue stats.", err)
+								return nil, err
+							}
+							metrics = append(metrics, issueMetrics...)
+						} else {
+							stats, err := repoStats(r)
+							if err != nil {
+								LogError("failed to get stats from repo object.", err)
+								return nil, err
+							}
+							repos[user][repoSlug] = stats
+						}
 					}
 				}
 				for repo, stats := range repos[user] {
@@ -162,29 +178,48 @@ func gitStats(accessToken string, mts []plugin.MetricType) ([]plugin.MetricType,
 					repo = useRepo
 				}
 				repoSlug := slug.Make(repo)
-				if _, ok := repos[user]; !ok {
-					repos[user] = make(map[string]map[string]int)
-				}
-				if _, ok := repos[user][repoSlug]; !ok {
-					r, _, err := client.GetRepository(ctx, user, repo)
+
+				if stat == "issuesbylabel" {
+					labels, issues, err := client.GetAllLabelsAndIssues(ctx, user, repo)
 					if err != nil {
-						LogError("failed to user repos.", err)
+						LogError("failed to get labels and issues from repo object.", err)
 						return nil, err
 					}
-					stats, err := repoStats(r)
+
+					issueMetrics, err := collectIssueMetrics(m, collectionTime, user, repoSlug, labels, issues)
 					if err != nil {
-						LogError("failed to get stats from repo object.", err)
+						LogError("failed to get issue stats.", err)
 						return nil, err
 					}
-					repos[user][repoSlug] = stats
+					metrics = append(metrics, issueMetrics...)
+				} else {
+
+					if _, ok := repos[user]; !ok {
+						repos[user] = make(map[string]map[string]int)
+					}
+					if _, ok := repos[user][repoSlug]; !ok {
+						r, _, err := client.GetRepository(ctx, user, repo)
+						if err != nil {
+							LogError("failed to user repos.", err)
+							return nil, err
+						}
+
+						stats, err := repoStats(r)
+						if err != nil {
+							LogError("failed to get stats from repo object.", err)
+							return nil, err
+						}
+						repos[user][repoSlug] = stats
+					}
+
+					mt := plugin.MetricType{
+						Data_:      repos[user][repo][stat],
+						Namespace_: core.NewNamespace("raintank", "apps", "gitstats", "repo", user, repoSlug, stat),
+						Timestamp_: collectionTime,
+						Version_:   m.Version(),
+					}
+					metrics = append(metrics, mt)
 				}
-				mt := plugin.MetricType{
-					Data_:      repos[user][repo][stat],
-					Namespace_: core.NewNamespace("raintank", "apps", "gitstats", "repo", user, repoSlug, stat),
-					Timestamp_: collectionTime,
-					Version_:   m.Version(),
-				}
-				metrics = append(metrics, mt)
 			}
 
 		case "user":
@@ -286,6 +321,48 @@ func userStats(ctx context.Context, user *github.User, client *GithubClient) (ma
 	return stats, nil
 }
 
+func collectIssueMetrics(m plugin.MetricType, collectionTime time.Time, owner string, repo string, labels []*github.Label, issues []*github.Issue) ([]plugin.MetricType, error) {
+	nolabel := "NoLabel"
+	type labelMetric struct {
+		label string
+		state string
+		value int
+	}
+	stats := make(map[string]*labelMetric, 0)
+
+	for _, lv := range labels {
+		labelSlug := slug.Make(*lv.Name)
+		stats[fmt.Sprintf("%s.open", labelSlug)] = &labelMetric{labelSlug, "open", 0}
+		stats[fmt.Sprintf("%s.closed", labelSlug)] = &labelMetric{labelSlug, "closed", 0}
+	}
+	stats[fmt.Sprintf("%s.open", nolabel)] = &labelMetric{nolabel, "open", 0}
+	stats[fmt.Sprintf("%s.closed", nolabel)] = &labelMetric{nolabel, "closed", 0}
+
+	for _, issue := range issues {
+		if len(issue.Labels) == 0 {
+			stats[fmt.Sprintf("%s.%s", nolabel, *issue.State)].value++
+		} else {
+			for _, label := range issue.Labels {
+				labelSlug := slug.Make(*label.Name)
+				stats[fmt.Sprintf("%s.%s", labelSlug, *issue.State)].value++
+			}
+		}
+	}
+
+	metrics := make([]plugin.MetricType, 0)
+	for k := range stats {
+		mt := plugin.MetricType{
+			Data_:      stats[k].value,
+			Namespace_: core.NewNamespace("raintank", "apps", "gitstats", "repo", owner, repo, "issuesbylabel", stats[k].label, stats[k].state, "count"),
+			Timestamp_: collectionTime,
+			Version_:   m.Version(),
+		}
+		metrics = append(metrics, mt)
+	}
+
+	return metrics, nil
+}
+
 func repoStats(resp *github.Repository) (map[string]int, error) {
 	stats := make(map[string]int)
 
@@ -302,7 +379,7 @@ func repoStats(resp *github.Repository) (map[string]int, error) {
 		stats["stars"] = *resp.StargazersCount
 	}
 	if resp.SubscribersCount != nil {
-		stats["subcribers"] = *resp.SubscribersCount
+		stats["subscribers"] = *resp.SubscribersCount
 	}
 	if resp.WatchersCount != nil {
 		stats["watchers"] = *resp.WatchersCount
@@ -325,6 +402,8 @@ func (f *Gitstats) GetMetricTypes(cfg plugin.ConfigType) ([]plugin.MetricType, e
 			Config_: cfg.ConfigDataNode,
 		})
 	}
+	mts = append(mts, getIssuesByLabelTypes(cfg)...)
+
 	for _, metricName := range userMetricNames {
 		mts = append(mts, plugin.MetricType{
 			Namespace_: core.NewNamespace("raintank", "apps", "gitstats", "user").
@@ -334,6 +413,23 @@ func (f *Gitstats) GetMetricTypes(cfg plugin.ConfigType) ([]plugin.MetricType, e
 		})
 	}
 	return mts, nil
+}
+
+func getIssuesByLabelTypes(cfg plugin.ConfigType) []plugin.MetricType {
+	mts := []plugin.MetricType{}
+
+	mts = append(mts, plugin.MetricType{
+		Namespace_: core.NewNamespace("raintank", "apps", "gitstats", "repo").
+			AddDynamicElement("owner", "repository owner").
+			AddDynamicElement("repo", "repository name").
+			AddStaticElement("issuesbylabel").
+			AddDynamicElement("label", "issue label").
+			AddDynamicElement("status", "issue status").
+			AddStaticElement("count"),
+		Config_: cfg.ConfigDataNode,
+	})
+
+	return mts
 }
 
 //GetConfigPolicy returns a ConfigPolicyTree for testing
