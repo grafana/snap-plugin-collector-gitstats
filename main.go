@@ -5,7 +5,7 @@ import (
 	// Import the snap plugin library
 	"github.com/intelsdi-x/snap/control/plugin"
 	// Import our collector plugin implementation
-	"github.com/raintank/raintank-apps/snap/plugin/snap-collector-rt-gitstats/gitstats"
+	"github.com/grafana/snap-plugin-collector-gitstats/gitstats"
 )
 
 func main() {
